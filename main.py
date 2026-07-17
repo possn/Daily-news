@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daily viral tech/science news digest -> Telegram."""
+"""Daily viral tech/science news digest -> Telegram, with AI summaries."""
 
 import os
 import re
@@ -20,6 +20,7 @@ QUOTA = {"ai": 2, "health": 1, "quantum": 1, "tech": 1}
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 UA = "Mozilla/5.0 (compatible; news-digest-bot/1.0)"
 
@@ -50,7 +51,6 @@ RSS_FEEDS = {
     ],
 }
 
-# HN Algolia queries per topic
 HN_QUERIES = {
     "ai": ["AI", "LLM", "machine learning", "neural network", "OpenAI", "Anthropic"],
     "health": ["medicine", "clinical trial", "FDA", "cancer", "vaccine", "biotech"],
@@ -237,7 +237,7 @@ def fetch_reddit(topic: str, now: datetime, cutoff: datetime) -> list:
             ratio = d.get("upvote_ratio", 0.5) or 0.5
             if ratio < 0.75:
                 continue
-            raw = (score + 3.0 * ncom) * 0.25  # normalize vs HN scale
+            raw = (score + 3.0 * ncom) * 0.25
             items.append(
                 Item(
                     title=html.unescape(title.strip()),
@@ -273,7 +273,7 @@ def fetch_rss(topic: str, now: datetime, cutoff: datetime) -> list:
             pub = datetime.fromtimestamp(time.mktime(tm), tz=timezone.utc)
             if pub < cutoff:
                 continue
-            raw = 25.0  # RSS has no virality signal; trust+recency decide
+            raw = 25.0
             items.append(
                 Item(
                     title=html.unescape(title.strip()),
@@ -337,7 +337,6 @@ def select(items: list) -> list:
             if sum(1 for c in chosen if c.topic == t) >= n:
                 break
 
-    # backfill if a topic came up empty
     if len(chosen) < 5:
         pool = [i for i in items if i.url.split("?")[0].rstrip("/") not in used]
         pool.sort(key=lambda x: x.score, reverse=True)
@@ -352,6 +351,88 @@ def select(items: list) -> list:
     return chosen[:5]
 
 
+# ---------------- article fetch + summarize ----------------
+
+def fetch_article_text(url: str, limit: int = 6000) -> str:
+    """Best-effort article body extraction. Returns '' on failure."""
+    try:
+        r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+        r.raise_for_status()
+        if "text/html" not in r.headers.get("content-type", ""):
+            return ""
+        h = r.text
+    except Exception as e:
+        print(f"[fetch] {url}: {e}")
+        return ""
+
+    h = re.sub(r"(?is)<(script|style|nav|header|footer|aside|form|noscript)[^>]*>.*?</\1>", " ", h)
+
+    m = re.search(r"(?is)<article[^>]*>(.*?)</article>", h)
+    if not m:
+        m = re.search(r"(?is)<main[^>]*>(.*?)</main>", h)
+    body = m.group(1) if m else h
+
+    paras = re.findall(r"(?is)<p[^>]*>(.*?)</p>", body)
+    text = " ".join(re.sub(r"(?s)<[^>]+>", " ", p) for p in paras)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+SUMMARY_PROMPT = """You are summarizing tech/science news items for a physician. \
+For each item below, write exactly 2 sentences in English: what happened, and why it matters. \
+Be concrete and factual. No hype, no speculation, no filler phrases. \
+If the CONTENT field is empty or uninformative, base the summary on the title alone and keep it \
+strictly descriptive without inventing details.
+
+Return ONLY a JSON array of objects with keys "n" (the item number) and "summary" (the 2 sentences). \
+No markdown, no code fences, no preamble.
+
+ITEMS:
+{items}"""
+
+
+def summarize(items: list) -> dict:
+    """Returns {index: summary_text}. Falls back to {} on failure."""
+    if not items:
+        return {}
+
+    blocks = []
+    for i, it in enumerate(items, 1):
+        body = fetch_article_text(it.url)
+        if not body:
+            body = it.snippet or ""
+        blocks.append(
+            f"[{i}]\nTITLE: {it.title}\nSOURCE: {domain_of(it.url)}\nCONTENT: {body}\n"
+        )
+    prompt = SUMMARY_PROMPT.format(items="\n".join(blocks))
+
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5",
+                "max_tokens": 1500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=90,
+        )
+        r.raise_for_status()
+        data = r.json()
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
+        parsed = json.loads(text)
+        return {int(o["n"]): o["summary"].strip() for o in parsed}
+    except Exception as e:
+        print(f"[summarize] {e}")
+        return {}
+
+
 # ---------------- output ----------------
 
 LABEL = {"ai": "🤖 AI", "health": "🧬 Health", "quantum": "⚛️ Quantum", "tech": "💻 Tech"}
@@ -361,7 +442,7 @@ def esc(s: str) -> str:
     return html.escape(s, quote=False)
 
 
-def build_message(items: list, now: datetime) -> str:
+def build_message(items: list, now: datetime, summaries: dict) -> str:
     lines = [f"<b>Daily Digest — {now.strftime('%d %b %Y')}</b>", ""]
     if not items:
         lines.append("No items passed the quality filter in the last 48h.")
@@ -370,6 +451,9 @@ def build_message(items: list, now: datetime) -> str:
     for i, it in enumerate(items, 1):
         lines.append(f"<b>{i}. {LABEL.get(it.topic, it.topic)}</b>")
         lines.append(f'<a href="{esc(it.url)}">{esc(it.title)}</a>')
+        s = summaries.get(i)
+        if s:
+            lines.append(esc(s))
         meta = f"{esc(it.source)} · {domain_of(it.url)} · score {it.score:.0f}"
         if it.comments_url:
             meta += f' · <a href="{esc(it.comments_url)}">discussion</a>'
@@ -410,7 +494,9 @@ def main() -> None:
     print(f"after dedupe={len(items)}")
     chosen = select(items)
     print(f"chosen={len(chosen)}")
-    send_telegram(build_message(chosen, now))
+    summaries = summarize(chosen)
+    print(f"summarized={len(summaries)}")
+    send_telegram(build_message(chosen, now, summaries))
 
 
 if __name__ == "__main__":
