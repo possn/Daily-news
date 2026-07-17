@@ -2,8 +2,6 @@ name: Daily News Digest
 
 on:
   schedule:
-    # 07:00 Lisbon year-round: 07:00 UTC (WET, winter) + 06:00 UTC (WEST, summer)
-    # Both fire; the guard step below cancels the wrong one.
     - cron: "0 7 * * *"
     - cron: "0 6 * * *"
   workflow_dispatch:
@@ -40,4 +38,5 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python main.py
