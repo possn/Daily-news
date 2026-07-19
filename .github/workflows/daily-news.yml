@@ -2,8 +2,8 @@ name: Daily News Digest
 
 on:
   schedule:
-    - cron: "0 7 * * *"
     - cron: "0 6 * * *"
+    - cron: "0 7 * * *"
   workflow_dispatch:
 
 jobs:
@@ -15,10 +15,10 @@ jobs:
         run: |
           H=$(TZ=Europe/Lisbon date +%H)
           echo "lisbon_hour=$H"
-          if [ "$H" != "07" ]; then
-            echo "run=false" >> $GITHUB_OUTPUT
-          else
+          if [ "$H" = "06" ] || [ "$H" = "07" ] || [ "$H" = "08" ]; then
             echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "run=false" >> $GITHUB_OUTPUT
           fi
 
       - uses: actions/checkout@v4
