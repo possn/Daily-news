@@ -3,38 +3,22 @@ name: Daily News Digest
 on:
   schedule:
     - cron: "0 6 * * *"
-    - cron: "0 7 * * *"
   workflow_dispatch:
 
 jobs:
   digest:
     runs-on: ubuntu-latest
     steps:
-      - name: Check Lisbon local hour
-        id: guard
-        run: |
-          H=$(TZ=Europe/Lisbon date +%H)
-          echo "lisbon_hour=$H"
-          if [ "$H" = "06" ] || [ "$H" = "07" ] || [ "$H" = "08" ]; then
-            echo "run=true" >> $GITHUB_OUTPUT
-          else
-            echo "run=false" >> $GITHUB_OUTPUT
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.guard.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
 
       - uses: actions/setup-python@v5
-        if: steps.guard.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         with:
           python-version: "3.12"
 
       - name: Install deps
-        if: steps.guard.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         run: pip install requests feedparser
 
       - name: Run digest
-        if: steps.guard.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
